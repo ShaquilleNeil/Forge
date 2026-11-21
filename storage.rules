@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Forge v1 — owner-only storage under users/{uid}/, plus a linked coach
+// may read the client's files (set videos).
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if request.auth != null
+        && firestore.exists(/databases/(default)/documents/coachLinks/$(request.auth.uid + '_' + uid));
+    }
+  }
+}

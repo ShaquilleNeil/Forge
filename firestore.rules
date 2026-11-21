@@ -1,0 +1,120 @@
+rules_version = '2';
+
+// Forge v1 — owner-only, plus the coach side: a coach linked to a client
+// may read that client's profile, workouts and records, and may send
+// them programs (stamped with the coach's uid). A sent program becomes
+// the client's active one.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isLinkedCoach(uid) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/coachLinks/$(request.auth.uid + '_' + uid));
+    }
+
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+
+      match /profile/{doc} {
+        allow read, write: if isOwner(uid);
+        allow read: if isLinkedCoach(uid);
+      }
+      match /workouts/{doc} {
+        allow read, write: if isOwner(uid);
+        allow read: if isLinkedCoach(uid);
+      }
+      match /records/{doc} {
+        allow read, write: if isOwner(uid);
+        allow read: if isLinkedCoach(uid);
+      }
+      match /programs/{programId} {
+        allow read, write: if isOwner(uid);
+        allow read: if isLinkedCoach(uid);
+        // A linked coach may send programs stamped with their own uid,
+        // and a sent program becomes the client's active one. So the
+        // coach may also flip isActive — and nothing else — on the
+        // client's programs (to deactivate the previous active one),
+        // and may overwrite a program they sent (re-send).
+        allow create: if isLinkedCoach(uid)
+          && request.resource.data.fromCoachUid == request.auth.uid
+          && request.resource.data.userId == uid
+          && request.resource.data.isActive == true;
+        allow update: if isLinkedCoach(uid)
+          && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive'])
+            && request.resource.data.isActive == false
+            || resource.data.fromCoachUid == request.auth.uid
+              && request.resource.data.fromCoachUid == request.auth.uid
+              && request.resource.data.userId == uid);
+      }
+      // Coaching programs (Nov 21): a second program list, fully
+      // separate from training. Strictly owner-only — a linked coach
+      // has no business reading another coach's library; the program
+      // reaches a client only as a stamped copy in the client's own
+      // `programs` collection (see the match above).
+      match /coachPrograms/{programId} {
+        allow read, write: if isOwner(uid);
+      }
+      // Bodyweight entries and Rank submission drafts: strictly
+      // owner-only, stated explicitly rather than left to the
+      // catch-all below (a linked coach has no read here).
+      match /bodyweight/{doc} {
+        allow read, write: if isOwner(uid);
+      }
+      match /submissions/{doc} {
+        allow read, write: if isOwner(uid);
+      }
+      // Everything else under a user stays strictly owner-only.
+      match /{other}/{doc=**} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Top-level submissions mirror (same doc id as the user subcollection).
+    // Create/read/update/delete only by the owner uid stored on the doc.
+    match /submissions/{submissionId} {
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.userId;
+      allow read, update, delete: if request.auth != null
+        && request.auth.uid == resource.data.userId;
+    }
+
+    // Coach–client links. Either side may read or delete (unlink);
+    // only the coach may update (marking a client as viewed, and
+    // nothing else). Links are created server-side only, by the
+    // redeemPairingCode Cloud Function, which verifies and spends
+    // the pairing code atomically — no client may create a link.
+    match /coachLinks/{linkId} {
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.coachUid
+          || request.auth.uid == resource.data.clientUid);
+      allow update: if request.auth != null
+        && request.auth.uid == resource.data.coachUid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastViewedAt']);
+      allow delete: if request.auth != null
+        && (request.auth.uid == resource.data.coachUid
+          || request.auth.uid == resource.data.clientUid);
+    }
+
+    // Pairing codes: the code is the credential. Any signed-in user may
+    // get a code doc (they must know the 6 characters to address it),
+    // but listing codes is owner-only — a list query must be scoped to
+    // the caller's own clientUid, so nobody can enumerate live codes.
+    // Only the client may create one; the client, or a coach who just
+    // linked them, may delete it (single use — normally spent by the
+    // redeemPairingCode function instead).
+    match /pairingCodes/{code} {
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.clientUid;
+      allow get: if request.auth != null;
+      allow list: if request.auth != null
+        && request.auth.uid == resource.data.clientUid;
+      allow delete: if request.auth != null
+        && (request.auth.uid == resource.data.clientUid
+          || isLinkedCoach(resource.data.clientUid));
+    }
+  }
+}
